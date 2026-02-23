@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Minesweeper Odyssey</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💣</text></svg>">
+<meta name="theme-color" content="#00ff88">
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: sans-serif; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+        .overlay { 
+            pointer-events: auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.9); width: 100%; height: 100%; color: #00ff88; text-align: center;
+        }
+        .hidden { display: none !important; }
+        button { 
+            background: transparent; color: #00ff88; border: 2px solid #00ff88;
+            padding: 12px 30px; margin: 10px; cursor: pointer; font-size: 1rem; transition: 0.2s;
+        }
+        button:hover { background: #00ff88; color: #000; }
+        #game-info { position: absolute; top: 20px; left: 20px; color: #00ff88; pointer-events: auto; display: flex; gap: 15px; }
+        .stat-box { background: rgba(0, 0, 0, 0.6); padding: 8px 15px; border: 1px solid #00ff88; }
+        #flag-mode-btn.active { background: #ffaa00; color: black; }
+        
+    </style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div id="menu" class="overlay">
+        <h1>3D MINESWEEPER</h1>
+        <div id="best-scores" style="margin-bottom: 20px; font-size: 0.8rem; color: #888;"></div>
+        <button onclick="startGame('easy')">Easy</button>
+        <button onclick="startGame('medium')">Medium</button>
+        <button onclick="startGame('hard')">Hard</button>
+    </div>
+
+    <div id="win-menu" class="overlay hidden">
+        <h1 style="color: #00ff88;">YOU WIN!</h1>
+        <p>Time: <span id="final-time">0</span>s | Best: <span id="best-time-display">0</span>s</p>
+        <button onclick="restartRound()">Play Again</button>
+        <button onclick="goHome()">Main Menu</button>
+    </div>
+
+    <div id="game-info" class="hidden">
+        <div class="stat-box">🚩 <span id="flag-count">0</span></div>
+        <div class="stat-box">⏱️ <span id="timer">0</span>s</div>
+        <button id="flag-mode-btn" onclick="toggleFlagMode()">Flag: OFF</button>
+        <button onclick="goHome()">Menu</button>
+    </div>
+</div>
+
+<div id="game-container"></div>
+
+<script>
+let scene, camera, renderer, player, raycaster, mouse;
+let grid = [], difficulty = 'easy', isPaused = true;
+let timerInterval, secondsElapsed = 0, zoomLevel = 10;
+let flagMode = false, flagsLeft = 0;
+
+const CONFIG = {
+    easy: { size: 8, mines: 10 },
+    medium: { size: 12, mines: 25 },
+    hard: { size: 15, mines: 45 }
+};
+
+// Initialize Three.js
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x050505);
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.getElementById('game-container').appendChild(renderer.domElement);
+    
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2();
+
+    scene.add(new THREE.AmbientLight(0x404040));
+    const light = new THREE.PointLight(0xffffff, 1, 100);
+    light.position.set(10, 10, 10);
+    scene.add(light);
+
+    player = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 16), new THREE.MeshBasicMaterial({ color: 0x00ff88 }));
+    scene.add(player);
+
+    window.addEventListener('mousedown', onMouseClick);
+    window.addEventListener('keydown', handleInput);
+    window.addEventListener('contextmenu', e => e.preventDefault());
+    
+    updateBestScoreDisplay();
+    animate();
+}
+
+function startGame(level) {
+    difficulty = level;
+    isPaused = false;
+    secondsElapsed = 0;
+    flagsLeft = CONFIG[level].mines;
+    zoomLevel = CONFIG[level].size + 4;
+    
+    document.getElementById('menu').classList.add('hidden');
+    document.getElementById('game-info').classList.remove('hidden');
+    document.getElementById('flag-count').innerText = flagsLeft;
+    
+    createGrid();
+    startTimer();
+}
+
+function createGrid() {
+    grid.forEach(obj => scene.remove(obj));
+    grid = [];
+    const size = CONFIG[difficulty].size;
+    const minePositions = new Set();
+    while(minePositions.size < CONFIG[difficulty].mines) {
+        minePositions.add(Math.floor(Math.random() * (size * size)));
+    }
+
+    for (let i = 0; i < size * size; i++) {
+        const x = i % size, z = Math.floor(i / size);
+        const cube = new THREE.Mesh(
+            new THREE.BoxGeometry(0.85, 0.85, 0.85),
+            new THREE.MeshPhongMaterial({ color: 0x333333 })
+        );
+        cube.position.set(x - size/2, 0, z - size/2);
+        cube.userData = { isMine: minePositions.has(i), revealed: false, flagged: false, index: i };
+        scene.add(cube);
+        grid.push(cube);
+    }
+    player.position.set(0, 0.5, 0); 
+}
+
+function onMouseClick(e) {
+    if (isPaused) return;
+    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(grid);
+
+    if (intersects.length > 0) {
+        const block = intersects[0].object;
+        if (e.button === 2 || (e.button === 0 && flagMode)) {
+            if (block.userData.revealed) return;
+            if (!block.userData.flagged && flagsLeft > 0) {
+                block.userData.flagged = true;
+                flagsLeft--;
+                block.material.color.set(0xffaa00);
+            } else if (block.userData.flagged) {
+                block.userData.flagged = false;
+                flagsLeft++;
+                block.material.color.set(0x333333);
+            }
+            document.getElementById('flag-count').innerText = flagsLeft;
+        } else if (e.button === 0) {
+            revealBlock(block);
+        }
+    }
+}
+
+function revealBlock(block) {
+    if (block.userData.revealed || block.userData.flagged) return;
+    block.userData.revealed = true;
+    if (block.userData.isMine) {
+        block.material.color.set(0xff0000);
+        setTimeout(() => { alert("BOOM!"); restartRound(); }, 200);
+        return;
+    }
+    block.position.y = -0.4;
+    block.material.color.set(0x111111);
+    const count = getNeighborCount(block.userData.index);
+    if (count > 0) drawNumber(block, count);
+    else revealNeighbors(block.userData.index);
+    checkWin();
+}
+
+function getNeighborCount(index) {
+    const size = CONFIG[difficulty].size;
+    const x = index % size, z = Math.floor(index / size);
+    let count = 0;
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+            let nx = x + dx, nz = z + dz;
+            if (nx >= 0 && nx < size && nz >= 0 && nz < size) {
+                if (grid[nz * size + nx].userData.isMine) count++;
+            }
+        }
+    }
+    return count;
+}
+
+function revealNeighbors(index) {
+    const size = CONFIG[difficulty].size;
+    const x = index % size, z = Math.floor(index / size);
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+            let nx = x + dx, nz = z + dz;
+            if (nx >= 0 && nx < size && nz >= 0 && nz < size) {
+                let neighbor = grid[nz * size + nx];
+                if (!neighbor.userData.revealed) revealBlock(neighbor);
+            }
+        }
+    }
+}
+
+function drawNumber(block, count) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const colors = ["", "#4287f5", "#34eb5e", "#eb4034", "#1a1a8c", "#8c1a1a", "#1a8c8c", "#000", "#888"];
+    ctx.fillStyle = colors[count];
+    ctx.font = "bold 44px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(count, 32, 48);
+    block.material = new THREE.MeshPhongMaterial({ map: new THREE.CanvasTexture(canvas) });
+}
+
+function startTimer() {
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => { if (!isPaused) { secondsElapsed++; document.getElementById('timer').innerText = secondsElapsed; } }, 1000);
+}
+
+function checkWin() {
+    const won = grid.every(b => b.userData.isMine || b.userData.revealed);
+    if (won) {
+        isPaused = true;
+        const best = saveScore(difficulty, secondsElapsed);
+        document.getElementById('final-time').innerText = secondsElapsed;
+        document.getElementById('best-time-display').innerText = best;
+        document.getElementById('win-menu').classList.remove('hidden');
+    }
+}
+
+function saveScore(level, time) {
+    let scores = JSON.parse(localStorage.getItem('ms_scores')) || {};
+    if (!scores[level] || time < scores[level]) { scores[level] = time; localStorage.setItem('ms_scores', JSON.stringify(scores)); }
+    return scores[level];
+}
+
+function updateBestScoreDisplay() {
+    const scores = JSON.parse(localStorage.getItem('ms_scores')) || {};
+    const d = document.getElementById('best-scores');
+    if(d) d.innerText = `Records - E: ${scores.easy||'--'}s | M: ${scores.medium||'--'}s | H: ${scores.hard||'--'}s`;
+}
+
+// FIX: New CodePen-safe goHome function
+function goHome() {
+    isPaused = true;
+    clearInterval(timerInterval);
+    document.getElementById('menu').classList.remove('hidden');
+    document.getElementById('win-menu').classList.add('hidden');
+    document.getElementById('game-info').classList.add('hidden');
+    updateBestScoreDisplay();
+}
+
+function restartRound() {
+    document.getElementById('win-menu').classList.add('hidden');
+    startGame(difficulty);
+}
+
+function toggleFlagMode() {
+    flagMode = !flagMode;
+    const btn = document.getElementById('flag-mode-btn');
+    btn.classList.toggle('active', flagMode);
+    btn.innerText = flagMode ? "Flag: ON" : "Flag: OFF";
+}
+
+function handleInput(e) {
+    if (isPaused) return;
+    const s = 0.4, k = e.key.toLowerCase();
+    if (k === 'w') player.position.z -= s;
+    if (k === 's') player.position.z += s;
+    if (k === 'a') player.position.x -= s;
+    if (k === 'd') player.position.x += s;
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    if (!isPaused) {
+        camera.position.lerp(new THREE.Vector3(player.position.x, zoomLevel, player.position.z + (zoomLevel/1.5)), 0.1);
+        camera.lookAt(player.position.x, 0, player.position.z);
+        renderer.render(scene, camera);
+    }
+}
+
+init();
+</script>
+</body>
+</html>
